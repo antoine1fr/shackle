@@ -182,10 +182,12 @@ handle_msg({timeout, ExtRequestId}, {#state {
 
     case erlang:function_exported(Client, handle_timeout, 2) of
         true ->
+            TimeBeforeClientHandleData = os:timestamp(),
             try Client:handle_timeout(ExtRequestId, ClientState) of
                 {ok, Reply, ClientState2} ->
                     ?METRICS(Client, counter, <<"handle_timeout">>),
-                    process_responses([Reply], State),
+                    process_responses([Reply], State,
+                                      TimeBeforeClientHandleData),
                     {ok, {State, ClientState2}};
                 {error, Reason, ClientState2} ->
                     ?WARN(PoolName, "handle_timeout error: ~p", [Reason]),
@@ -326,9 +328,10 @@ handle_msg_data(Socket, Data, #state {
     } = State, ClientState) ->
 
     ?METRICS(Client, counter, <<"recv">>),
+    TimeBeforeClientHandleData = os:timestamp(),
     try Client:handle_data(Data, ClientState) of
         {ok, Replies, ClientState2} ->
-            process_responses(Replies, State),
+            process_responses(Replies, State, TimeBeforeClientHandleData),
             {ok, {State, ClientState2}};
         {error, Reason, ClientState2} ->
             ?WARN(PoolName, "handle_data error: ~p", [Reason]),
@@ -356,13 +359,13 @@ handle_msg_error(Socket, Reason, #state {
 handle_msg_error(_Socket, _Reason, State, ClientState) ->
     {ok, {State, ClientState}}.
 
-process_responses([], _State) ->
+process_responses([], _State, _TimeBeforeClientHandleData) ->
     ok;
 process_responses([{ExtRequestId, Reply} | T], #state {
         client = Client,
         id = Id,
         queue = Queue
-    } = State) ->
+    } = State, TimeBeforeClientHandleData) ->
 
     ?METRICS(Client, counter, <<"replies">>),
     case shackle_queue:remove(Queue, Id, ExtRequestId) of
@@ -370,13 +373,15 @@ process_responses([{ExtRequestId, Reply} | T], #state {
             ?METRICS(Client, counter, <<"found">>),
             Diff = timer:now_diff(os:timestamp(), Timestamp),
             ?METRICS(Client, timing, <<"reply">>, Diff),
+            Diff2 = timer:now_diff(TimeBeforeClientHandleData, Timestamp),
+            ?METRICS(Client, timing, <<"before_client_handle_data">>, Diff2),
             erlang:cancel_timer(TimerRef),
             reply(Reply, Cast, State);
         {error, not_found} ->
             ?METRICS(Client, counter, <<"not_found">>, 1),
             ok
     end,
-    process_responses(T, State).
+    process_responses(T, State, TimeBeforeClientHandleData).
 
 reconnect(State, undefined) ->
     reconnect_timer(State, undefined);
